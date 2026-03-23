@@ -1,0 +1,14 @@
+[project]
+name = "sui-memory"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.4.3",
+    "sentence-transformers>=5.3.0",
+    "sqlite-vec>=0.1.7",
+]
+
+[project.scripts]
+sui-memory-hook = "src.hook:main"
+sui-memory-inject = "src.injector:main"

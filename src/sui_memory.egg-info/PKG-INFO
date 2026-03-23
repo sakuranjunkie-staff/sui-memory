@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: sui-memory
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.14
+Requires-Dist: numpy>=2.4.3
+Requires-Dist: sentence-transformers>=5.3.0
+Requires-Dist: sqlite-vec>=0.1.7

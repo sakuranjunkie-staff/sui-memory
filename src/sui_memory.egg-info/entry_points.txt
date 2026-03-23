@@ -1,0 +1,2 @@
+[console_scripts]
+sui-memory-hook = src.hook:main
