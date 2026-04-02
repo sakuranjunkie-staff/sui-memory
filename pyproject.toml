@@ -12,3 +12,8 @@ dependencies = [
 [project.scripts]
 sui-memory-hook = "src.hook:main"
 sui-memory-inject = "src.injector:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

@@ -18,7 +18,7 @@ if str(_src_dir) not in sys.path:
     sys.path.insert(0, str(_src_dir))
 
 from chunker import load_chunks
-from storage import init_db, save_chunks
+from storage import init_db, save_chunks_text_only
 
 
 def _log(message: str) -> None:
@@ -129,8 +129,8 @@ def main() -> None:
         # DBを初期化（既存テーブルがあればスキップ）
         init_db()
 
-        # チャンクをDBに保存（session_id重複は自動スキップ）
-        inserted = save_chunks(chunks)
+        # テキストのみDBに保存（embedding=NULL、ベクトル化は/srで遅延実行）
+        inserted = save_chunks_text_only(chunks)
 
         # セッションIDは先頭チャンクから取得（短縮表示用）
         session_short = chunks[0].get("session_id", "")[:8]

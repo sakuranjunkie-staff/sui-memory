@@ -26,6 +26,12 @@ def _extract_text(content) -> str:
     return ""
 
 
+# ノイズフィルター: この文字数未満のユーザーテキストはスキップする
+# "ok", "はい", "了解" 等の相槌・確認のみのやり取りを除外する
+# 保守的に低く設定（3未満）: "確認して"(4字)・"ありがとう"(5字)は残す
+_MIN_USER_TEXT_LEN = 3
+
+
 def load_chunks(transcript_path: str) -> list[dict]:
     """
     transcriptファイル（jsonl）を読み込み、Q&Aペアのチャンクリストを返す。
@@ -71,8 +77,13 @@ def load_chunks(transcript_path: str) -> list[dict]:
             continue
 
         if msg_type == "user":
-            # 前のuserが未ペアのまま残っている場合は破棄して上書き
-            pending_user = entry
+            # ツール結果のみのターン（type="tool_result" ブロックのみ）は
+            # pending_user を上書きしない。
+            # 「質問 → ツールコール × N → 最終回答」の流れで元の質問が
+            # ツール結果ターンに上書きされてしまうバグを防ぐ。
+            user_content = entry.get("message", {}).get("content", "")
+            if _extract_text(user_content):
+                pending_user = entry
 
         elif msg_type == "assistant":
             if pending_user is None:
@@ -101,6 +112,12 @@ def load_chunks(transcript_path: str) -> list[dict]:
 
             # userテキストが空の場合はペアごとスキップ
             if not user_text:
+                pending_user = None
+                continue
+
+            # ノイズフィルター: 短すぎる相槌・確認はスキップ
+            # （"ok", "はい", "了解" 等。_MIN_USER_TEXT_LEN 文字未満）
+            if len(user_text) < _MIN_USER_TEXT_LEN:
                 pending_user = None
                 continue
 

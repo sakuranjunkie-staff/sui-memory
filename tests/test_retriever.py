@@ -12,7 +12,7 @@ from pathlib import Path
 # srcディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from retriever import rrf_score, time_decay, search
+from retriever import rrf_score, time_decay, search, search_by_timerange, search_recent
 from storage import init_db, save_chunks
 
 
@@ -209,6 +209,178 @@ def test_search_all_required_fields():
     print("  OK: 必要フィールド全て存在")
 
 
+# --- search_by_timerange / search_recent のテスト ---
+
+def make_db_with_aged_data() -> Path:
+    """
+    新旧混在のテスト用DBを作成する。
+    - 直近3日以内: Python関連チャンク2件
+    - 30日前: SQL関連チャンク1件（時間フィルターで除外される想定）
+    """
+    import sqlite3
+
+    db = Path(tempfile.mktemp(suffix=".db"))
+    init_db(db)
+
+    # 通常のsave_chunksで新しいデータを保存（created_at = now）
+    recent_chunks = [
+        {
+            "user": "Pythonの非同期処理について",
+            "assistant": "asyncioとawaitを使って非同期処理を実装できます",
+            "timestamp": "2026-03-24T10:00:00.000Z",
+            "session_id": "aged-s1",
+            "project": "/tmp",
+        },
+        {
+            "user": "Pythonのデコレーターの使い方",
+            "assistant": "@functools.wrapsを使ってデコレーターを正しく実装します",
+            "timestamp": "2026-03-24T10:01:00.000Z",
+            "session_id": "aged-s2",
+            "project": "/tmp",
+        },
+    ]
+    save_chunks(recent_chunks, db)
+
+    # 30日前のチャンクを直接INSERTしてcreated_atを上書きする
+    old_created_at = time.time() - 30 * 86400
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    # aged-s3のcreated_atを30日前に更新
+    conn.execute(
+        "INSERT INTO memories (session_id, project, user_text, assistant_text, timestamp, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "aged-s3",
+            "/tmp",
+            "SQLのJOINの種類",
+            "INNER JOIN・LEFT JOIN・RIGHT JOINなどがあります",
+            "2026-02-22T10:00:00.000Z",
+            old_created_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    return db
+
+
+def test_search_by_timerange_excludes_old():
+    """days=7フィルターで30日前のデータが除外されること"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python SQL", days=7, limit=10, db_path=db)
+
+    # 30日前のSQL関連チャンクは含まれないはず
+    texts = [r["user_text"] + r["assistant_text"] for r in results]
+    assert not any("JOIN" in t for t in texts), "30日前のSQLチャンクが除外されていない"
+    print(f"  OK: search_by_timerange 7日フィルター → 古いデータ除外確認 ({len(results)}件)")
+
+
+def test_search_by_timerange_includes_recent():
+    """days=7フィルターで直近データが含まれること"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python", days=7, limit=5, db_path=db)
+
+    assert len(results) >= 1
+    print(f"  OK: search_by_timerange 7日フィルター → 直近データあり ({len(results)}件)")
+
+
+def test_search_by_timerange_wide_includes_old():
+    """days=60フィルターなら30日前のデータも含まれること"""
+    db = make_db_with_aged_data()
+    # "SQL JOIN" のみ: aged-s3のuser_text/assistant_textに両語が含まれる
+    # FTS5はAND検索なので、aged-s3に存在しない "Python" は含めない
+    results = search_by_timerange("SQL JOIN", days=60, limit=10, db_path=db)
+
+    texts = [r["user_text"] + r["assistant_text"] for r in results]
+    assert any("JOIN" in t for t in texts), "60日フィルターでSQLチャンクが含まれていない"
+    print(f"  OK: search_by_timerange 60日フィルター → 古いデータ含む ({len(results)}件)")
+
+
+def test_search_by_timerange_has_score_field():
+    """search_by_timerangeの各結果にscoreフィールドが含まれること"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python", days=7, limit=5, db_path=db)
+
+    assert all("score" in r for r in results)
+    print("  OK: search_by_timerange scoreフィールドあり")
+
+
+def test_search_by_timerange_score_descending():
+    """search_by_timerangeの結果がスコア降順に並んでいること"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python", days=7, limit=5, db_path=db)
+
+    if len(results) >= 2:
+        scores = [r["score"] for r in results]
+        assert all(scores[i] >= scores[i + 1] for i in range(len(scores) - 1))
+    print("  OK: search_by_timerange スコア降順")
+
+
+def test_search_by_timerange_no_distance_field():
+    """search_by_timerangeの結果にdistanceフィールドが含まれないこと"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python", days=7, limit=5, db_path=db)
+
+    assert all("distance" not in r for r in results)
+    print("  OK: search_by_timerange distanceフィールドなし")
+
+
+def test_search_by_timerange_limit():
+    """limitパラメータで件数が制限されること"""
+    db = make_db_with_aged_data()
+    results = search_by_timerange("Python", days=7, limit=1, db_path=db)
+
+    assert len(results) <= 1
+    print(f"  OK: search_by_timerange limit=1 → {len(results)}件")
+
+
+def test_search_by_timerange_empty_when_all_old():
+    """全データが対象期間外の場合は空リストを返すこと"""
+    db = make_db_with_aged_data()
+    # 1日以内のフィルター（直近データは数秒〜数分前なのでヒットするはず…
+    # だが全データが古い専用DBを用意して確認する）
+    import sqlite3
+    db2 = Path(tempfile.mktemp(suffix=".db"))
+    init_db(db2)
+    old_created_at = time.time() - 30 * 86400
+    conn = sqlite3.connect(str(db2))
+    conn.execute(
+        "INSERT INTO memories (session_id, project, user_text, assistant_text, timestamp, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("old-only", "/tmp", "古いPythonの話", "昔の話です", "2026-01-01T00:00:00.000Z", old_created_at),
+    )
+    conn.commit()
+    conn.close()
+
+    results = search_by_timerange("Python", days=7, limit=5, db_path=db2)
+    assert results == []
+    print("  OK: search_by_timerange 全件が期間外 → 空リスト")
+
+
+def test_search_recent_is_7day_shortcut():
+    """search_recentがsearch_by_timerange(days=7)と同じ結果を返すこと"""
+    db = make_db_with_aged_data()
+
+    result_recent = search_recent("Python", limit=5, db_path=db)
+    result_7day = search_by_timerange("Python", days=7, limit=5, db_path=db)
+
+    # IDセットが一致することを確認
+    ids_recent = {r["id"] for r in result_recent}
+    ids_7day = {r["id"] for r in result_7day}
+    assert ids_recent == ids_7day
+    print(f"  OK: search_recent = search_by_timerange(days=7) ({len(result_recent)}件)")
+
+
+def test_search_recent_excludes_old():
+    """search_recentが30日前のデータを除外すること"""
+    db = make_db_with_aged_data()
+    results = search_recent("SQL JOIN", limit=10, db_path=db)
+
+    texts = [r["user_text"] + r["assistant_text"] for r in results]
+    assert not any("JOIN" in t for t in texts)
+    print("  OK: search_recent 30日前データ除外確認")
+
+
 if __name__ == "__main__":
     print("=== retriever テスト開始 ===")
     test_rrf_score_rank0()
@@ -228,4 +400,15 @@ if __name__ == "__main__":
     test_search_no_distance_field()
     test_search_rrf_fusion()
     test_search_all_required_fields()
+    print("--- search_by_timerange / search_recent テスト ---")
+    test_search_by_timerange_excludes_old()
+    test_search_by_timerange_includes_recent()
+    test_search_by_timerange_wide_includes_old()
+    test_search_by_timerange_has_score_field()
+    test_search_by_timerange_score_descending()
+    test_search_by_timerange_no_distance_field()
+    test_search_by_timerange_limit()
+    test_search_by_timerange_empty_when_all_old()
+    test_search_recent_is_7day_shortcut()
+    test_search_recent_excludes_old()
     print("=== 全テスト通過 ===")
