@@ -267,6 +267,11 @@ def fts_search(query: str, limit: int = 20, db_path: Path = DB_PATH) -> list[dic
     conn = _get_conn(db_path)
     try:
         cur = conn.cursor()
+        # FTS5の特殊構文（ハイフン・コロン等）を安全にするため、
+        # 各トークンをダブルクォートで囲んでフレーズ検索として渡す
+        escaped_query = " ".join(f'"{t}"' for t in query.split() if t)
+        if not escaped_query:
+            return []
         cur.execute(
             """
             SELECT
@@ -284,7 +289,7 @@ def fts_search(query: str, limit: int = 20, db_path: Path = DB_PATH) -> list[dic
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            (escaped_query, limit),
         )
         return [dict(row) for row in cur.fetchall()]
     finally:
