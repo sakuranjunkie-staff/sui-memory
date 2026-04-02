@@ -109,3 +109,85 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
     # --- Step 6: 最終スコア降順でlimit件返す ---
     sorted_results = sorted(merged.values(), key=lambda r: r["score"], reverse=True)
     return sorted_results[:limit]
+
+
+def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
+    """
+    指定した日数以内のメモリのみを対象にしてハイブリッド検索する。
+
+    処理手順:
+    1. fts_search・vector_search で候補を広めに取得（各20件）
+    2. created_at が cutoff 以降のものだけに絞り込む（時間フィルター）
+    3. 残った候補に対してRRFスコア統合・時間減衰を適用する
+    4. 最終スコア降順でlimit件返す
+
+    Args:
+        query: 検索クエリ文字列
+        days: 直近何日以内を対象にするか（例: 7 → 直近7日以内）
+        limit: 返す件数（デフォルト5）
+        db_path: DBファイルのパス
+
+    Returns:
+        scoreフィールドを含むdictのリスト（スコア降順）
+    """
+    # 時間フィルターのカットオフ（Unix timestamp）
+    cutoff = time.time() - days * 86400
+
+    # --- Step 1: FTS5キーワード検索とベクトル検索（広めに取得）---
+    fts_results = fts_search(query, limit=20, db_path=db_path)
+    query_vec = embed_query(query)
+    vec_results = vector_search(query_vec, limit=20, db_path=db_path)
+
+    # --- Step 2: created_at フィルターを適用（カットオフ以降のみ残す）---
+    fts_results = [r for r in fts_results if r["created_at"] >= cutoff]
+    vec_results = [r for r in vec_results if r["created_at"] >= cutoff]
+
+    # --- Step 3: RRFスコア統合 ---
+    merged: dict[int, dict] = {}
+
+    # FTS5結果のRRFスコアを加算
+    for rank, row in enumerate(fts_results):
+        row_id = row["id"]
+        if row_id not in merged:
+            merged[row_id] = dict(row)
+            merged[row_id]["_rrf"] = 0.0
+        merged[row_id]["_rrf"] += rrf_score(rank)
+
+    # ベクトル検索結果のRRFスコアを加算（同一idは累積）
+    for rank, row in enumerate(vec_results):
+        row_id = row["id"]
+        if row_id not in merged:
+            merged[row_id] = dict(row)
+            merged[row_id]["_rrf"] = 0.0
+        merged[row_id]["_rrf"] += rrf_score(rank)
+
+    # 時間減衰を掛けて最終スコアを計算
+    for record in merged.values():
+        decay = time_decay(record["created_at"])
+        record["score"] = record["_rrf"] * decay
+
+    # 内部計算用フィールドを除去
+    for record in merged.values():
+        record.pop("_rrf", None)
+        record.pop("distance", None)
+
+    # --- Step 4: 最終スコア降順でlimit件返す ---
+    sorted_results = sorted(merged.values(), key=lambda r: r["score"], reverse=True)
+    return sorted_results[:limit]
+
+
+def search_recent(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
+    """
+    直近7日以内のメモリを対象にしてハイブリッド検索するショートカット。
+
+    search_by_timerange(query, days=7, limit=limit) の呼び出しと同等。
+
+    Args:
+        query: 検索クエリ文字列
+        limit: 返す件数（デフォルト5）
+        db_path: DBファイルのパス
+
+    Returns:
+        scoreフィールドを含むdictのリスト（スコア降順）
+    """
+    return search_by_timerange(query, days=7, limit=limit, db_path=db_path)
