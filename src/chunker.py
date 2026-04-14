@@ -31,6 +31,14 @@ def _extract_text(content) -> str:
 # 保守的に低く設定（3未満）: "確認して"(4字)・"ありがとう"(5字)は残す
 _MIN_USER_TEXT_LEN = 3
 
+# コンテキスト継続サマリーフィルター:
+# Claude Codeがコンテキスト上限に達したとき、自動生成する要約テキストが
+# user_text として混入する。これはユーザーの発言ではないのでスキップする。
+_CONTEXT_SUMMARY_PREFIXES = (
+    "This session is being continued from a previous conversation that ran out of context.",
+    "このセッションは、コンテキストが不足したため、以前の会話から継続されています。",
+)
+
 
 def load_chunks(transcript_path: str) -> list[dict]:
     """
@@ -118,6 +126,14 @@ def load_chunks(transcript_path: str) -> list[dict]:
             # ノイズフィルター: 短すぎる相槌・確認はスキップ
             # （"ok", "はい", "了解" 等。_MIN_USER_TEXT_LEN 文字未満）
             if len(user_text) < _MIN_USER_TEXT_LEN:
+                pending_user = None
+                continue
+
+            # コンテキスト継続サマリーフィルター:
+            # "This session is being continued..." で始まるテキストは
+            # Claude Codeが自動生成した要約であり、ユーザーの発言ではない。
+            # ベクトル化・検索の対象から除外する。
+            if any(user_text.startswith(prefix) for prefix in _CONTEXT_SUMMARY_PREFIXES):
                 pending_user = None
                 continue
 

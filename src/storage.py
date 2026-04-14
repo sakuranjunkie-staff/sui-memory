@@ -365,7 +365,12 @@ def get_all(limit: int = 1000, db_path: Path = DB_PATH) -> list[dict]:
         conn.close()
 
 
-def vector_search(query_vec: list[float], limit: int = 20, db_path: Path = DB_PATH) -> list[dict]:
+def vector_search(
+    query_vec: list[float],
+    limit: int = 20,
+    db_path: Path = DB_PATH,
+    exclude_project: str | None = None,
+) -> list[dict]:
     """
     sqlite-vecを使ってコサイン類似度でベクトル検索する。
 
@@ -373,6 +378,7 @@ def vector_search(query_vec: list[float], limit: int = 20, db_path: Path = DB_PA
         query_vec: embed_query()で生成したクエリベクトル
         limit: 最大取得件数（デフォルト20）
         db_path: DBファイルのパス
+        exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
 
     Returns:
         類似度の高い順に並んだdictのリスト。
@@ -381,32 +387,59 @@ def vector_search(query_vec: list[float], limit: int = 20, db_path: Path = DB_PA
     conn = _get_conn(db_path)
     try:
         cur = conn.cursor()
-        # embeddingがNULLのレコードは除外する
-        cur.execute(
-            """
-            SELECT
-                m.id,
-                m.session_id,
-                m.project,
-                m.project_name,
-                m.user_text,
-                m.assistant_text,
-                m.timestamp,
-                m.created_at,
-                vec_distance_cosine(m.embedding, ?) AS distance
-            FROM memories m
-            WHERE m.embedding IS NOT NULL
-            ORDER BY distance ASC
-            LIMIT ?
-            """,
-            (_vec_to_blob(query_vec), limit),
-        )
+        # embeddingがNULLのレコードは除外する。必要に応じてプロジェクト除外も適用する
+        if exclude_project:
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.project,
+                    m.project_name,
+                    m.user_text,
+                    m.assistant_text,
+                    m.timestamp,
+                    m.created_at,
+                    vec_distance_cosine(m.embedding, ?) AS distance
+                FROM memories m
+                WHERE m.embedding IS NOT NULL
+                  AND (m.project IS NULL OR m.project != ?)
+                ORDER BY distance ASC
+                LIMIT ?
+                """,
+                (_vec_to_blob(query_vec), exclude_project, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.project,
+                    m.project_name,
+                    m.user_text,
+                    m.assistant_text,
+                    m.timestamp,
+                    m.created_at,
+                    vec_distance_cosine(m.embedding, ?) AS distance
+                FROM memories m
+                WHERE m.embedding IS NOT NULL
+                ORDER BY distance ASC
+                LIMIT ?
+                """,
+                (_vec_to_blob(query_vec), limit),
+            )
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
 
 
-def fts_search(query: str, limit: int = 20, db_path: Path = DB_PATH) -> list[dict]:
+def fts_search(
+    query: str,
+    limit: int = 20,
+    db_path: Path = DB_PATH,
+    exclude_project: str | None = None,
+) -> list[dict]:
     """
     FTS5でキーワード検索する。
 
@@ -414,6 +447,7 @@ def fts_search(query: str, limit: int = 20, db_path: Path = DB_PATH) -> list[dic
         query: 検索クエリ文字列
         limit: 最大取得件数（デフォルト20）
         db_path: DBファイルのパス
+        exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
 
     Returns:
         マッチしたrowid・スコア・全フィールドを含むdictのリスト
@@ -428,26 +462,49 @@ def fts_search(query: str, limit: int = 20, db_path: Path = DB_PATH) -> list[dic
         escaped_query = " ".join(f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in query.split() if t)
         if not escaped_query:
             return []
-        cur.execute(
-            """
-            SELECT
-                m.id,
-                m.session_id,
-                m.project,
-                m.project_name,
-                m.user_text,
-                m.assistant_text,
-                m.timestamp,
-                m.created_at,
-                rank AS score
-            FROM memories_fts
-            JOIN memories m ON memories_fts.rowid = m.id
-            WHERE memories_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (escaped_query, limit),
-        )
+        if exclude_project:
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.project,
+                    m.project_name,
+                    m.user_text,
+                    m.assistant_text,
+                    m.timestamp,
+                    m.created_at,
+                    rank AS score
+                FROM memories_fts
+                JOIN memories m ON memories_fts.rowid = m.id
+                WHERE memories_fts MATCH ?
+                  AND (m.project IS NULL OR m.project != ?)
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (escaped_query, exclude_project, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.project,
+                    m.project_name,
+                    m.user_text,
+                    m.assistant_text,
+                    m.timestamp,
+                    m.created_at,
+                    rank AS score
+                FROM memories_fts
+                JOIN memories m ON memories_fts.rowid = m.id
+                WHERE memories_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (escaped_query, limit),
+            )
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()

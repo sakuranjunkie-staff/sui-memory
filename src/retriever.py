@@ -47,7 +47,7 @@ def time_decay(created_at: float, half_life_days: int = 30) -> float:
     return 0.5 ** (elapsed / half_life_seconds)
 
 
-def search(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
+def search(query: str, limit: int = 5, db_path: Path = DB_PATH, exclude_project: str | None = None) -> list[dict]:
     """
     FTS5キーワード検索とベクトル検索をRRFで統合し、
     時間減衰を適用した最終スコアで上位limit件を返す。
@@ -69,11 +69,11 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
         scoreフィールドを含むdictのリスト（スコア降順）
     """
     # --- Step 1: FTS5キーワード検索 ---
-    fts_results = fts_search(query, limit=20, db_path=db_path)
+    fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project)
 
     # --- Step 2 & 3: ベクトル検索 ---
     query_vec = embed_query(query)
-    vec_results = vector_search(query_vec, limit=20, db_path=db_path)
+    vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project)
 
     # --- Step 4: RRFスコア統合 ---
     # id → {レコード本体, rrf合計スコア} のマップ
@@ -111,7 +111,7 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
     return sorted_results[:limit]
 
 
-def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
+def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = DB_PATH, exclude_project: str | None = None) -> list[dict]:
     """
     指定した日数以内のメモリのみを対象にしてハイブリッド検索する。
 
@@ -134,9 +134,9 @@ def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = D
     cutoff = time.time() - days * 86400
 
     # --- Step 1: FTS5キーワード検索とベクトル検索（広めに取得）---
-    fts_results = fts_search(query, limit=20, db_path=db_path)
+    fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project)
     query_vec = embed_query(query)
-    vec_results = vector_search(query_vec, limit=20, db_path=db_path)
+    vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project)
 
     # --- Step 2: created_at フィルターを適用（カットオフ以降のみ残す）---
     fts_results = [r for r in fts_results if r["created_at"] >= cutoff]
@@ -176,7 +176,12 @@ def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = D
     return sorted_results[:limit]
 
 
-def search_recent(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[dict]:
+def search_recent(
+    query: str,
+    limit: int = 5,
+    db_path: Path = DB_PATH,
+    exclude_project: str | None = None,
+) -> list[dict]:
     """
     直近7日以内のメモリを対象にしてハイブリッド検索するショートカット。
 
@@ -186,8 +191,9 @@ def search_recent(query: str, limit: int = 5, db_path: Path = DB_PATH) -> list[d
         query: 検索クエリ文字列
         limit: 返す件数（デフォルト5）
         db_path: DBファイルのパス
+        exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
 
     Returns:
         scoreフィールドを含むdictのリスト（スコア降順）
     """
-    return search_by_timerange(query, days=7, limit=limit, db_path=db_path)
+    return search_by_timerange(query, days=7, limit=limit, db_path=db_path, exclude_project=exclude_project)
