@@ -1,0 +1,4 @@
+{
+  "name": "sui-memory",
+  "description": "Long-term memory system for Claude Code. Save and vectorize session Q&A pairs."
+}
