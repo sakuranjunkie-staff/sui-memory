@@ -71,8 +71,9 @@ def main() -> None:
         print(f"[sui-memory injector] stdin解析エラー: {e}", file=sys.stderr)
         sys.exit(0)
 
-    # queryフィールドを取得する。なければ終了
-    query = data.get("query")
+    # promptフィールドを取得する（Claude CodeのUserPromptSubmitHookの仕様）
+    # 旧仕様の "query" フィールドにもフォールバックする
+    query = data.get("prompt") or data.get("query")
     if not query:
         sys.exit(0)
 

@@ -14,16 +14,41 @@ MODEL_NAME = "cl-nagoya/ruri-v3-310m"
 # シングルトンインスタンス（初回ロード後に使い回す）
 _embedder: SentenceTransformer | None = None
 
+# ドキュメント埋め込み対象テキストの最大文字数。
+# transcriptに巨大な貼り付け（スキルダンプ等）が混入すると1チャンクが50万字級になり、
+# モデル上限の8192トークンまで膨らんだ系列はCPUエンコード1件で20秒超かかる
+# （実測: 8192トークン1件=23秒）。先頭 _MAX_EMBED_CHARS 字に切り詰めて埋め込む。
+# 全文はDBとFTS5に保存済みなので、キーワード検索（FTS5）の正しさは損なわれない。
+# ベクトル側もQ&Aペアは冒頭にユーザー発言が来るため、先頭2000字で主題は十分捉えられる。
+_MAX_EMBED_CHARS = 2000
+
+# ドキュメントエンコード時のバッチサイズ。
+# sentence-transformersはバッチ内を最長系列にパディングするため、長短混在の
+# 大バッチでは短文まで最長系列ぶんの計算コストを払う
+# （実測: 長文1件を含む18件を一括エンコード=58秒 → batch_size=4 なら19秒）。
+# encode内部で長さ順ソートされるので、小バッチなら同程度の長さ同士が組になり
+# パディングの無駄が最長4件分に限定される。
+_ENCODE_BATCH_SIZE = 4
+
 
 def get_embedder() -> SentenceTransformer:
     """
     SentenceTransformerモデルをシングルトンで返す。
     初回呼び出し時のみモデルをダウンロード・初期化する。
+
+    ローカルキャッシュ済みなら local_files_only=True でロードし、HF Hub への
+    オンライン確認（毎回の "unauthenticated requests to the HF Hub" 往復）を回避する。
+    回線ぶんの遅延と、回線不調時のハングを防ぐ。未キャッシュ（初回など）は
+    オンライン取得にフォールバックする。
     """
     global _embedder
     if _embedder is None:
-        # 初回のみダウンロード・ロード（以降はキャッシュから読む）
-        _embedder = SentenceTransformer(MODEL_NAME)
+        try:
+            # キャッシュ済みモデルをオフラインでロード（HF Hub 往復をスキップ）
+            _embedder = SentenceTransformer(MODEL_NAME, local_files_only=True)
+        except Exception:
+            # 未キャッシュ時はオンラインでダウンロード・ロード
+            _embedder = SentenceTransformer(MODEL_NAME)
     return _embedder
 
 
@@ -42,8 +67,15 @@ def embed(texts: list[str]) -> list[list[float]]:
     model = get_embedder()
     # ドキュメント用プレフィックスを付与してエンコード
     # normalize_embeddings=True でL2正規化済みベクトルを返す（コサイン類似度計算に必要）
-    prefixed = ["文章: " + t for t in texts]
-    vectors = model.encode(prefixed, convert_to_numpy=True, normalize_embeddings=True)
+    # 巨大テキスト（貼り付けダンプ等）によるCPUエンコードのハングを防ぐため、
+    # 先頭 _MAX_EMBED_CHARS 字に切り詰め、小バッチでパディング増幅を抑える
+    prefixed = ["文章: " + t[:_MAX_EMBED_CHARS] for t in texts]
+    vectors = model.encode(
+        prefixed,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        batch_size=_ENCODE_BATCH_SIZE,
+    )
     return [v.tolist() for v in vectors]
 
 

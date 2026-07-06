@@ -12,6 +12,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Windowsのcp932問題を回避するためstdout/stderrをUTF-8に再設定する
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # srcパッケージとして実行される場合とスクリプト直接実行の両方に対応
 _src_dir = Path(__file__).parent
 if str(_src_dir) not in sys.path:
@@ -146,8 +150,8 @@ def main() -> None:
     CLAUDE.mdが存在するプロジェクトにはHANDOVER.mdも生成する。
     """
     try:
-        # stdinからフック情報を読み込む
-        raw = sys.stdin.read()
+        # stdinからフック情報を読み込む（バイト読みでサロゲート問題を回避）
+        raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
         hook_data = json.loads(raw)
         transcript_path = hook_data.get("transcript_path", "")
 

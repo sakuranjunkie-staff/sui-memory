@@ -120,6 +120,14 @@ def init_db(db_path: Path = DB_PATH) -> None:
             END
         """)
 
+        # 重複チェック（_build_to_insert）の高速化用インデックス。
+        # これが無いと (session_id, timestamp) の照会がチャンク1件ごとに
+        # memoriesテーブル（embedding BLOB込み）のフルスキャンになる
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_session_timestamp
+            ON memories(session_id, timestamp)
+        """)
+
         conn.commit()
     finally:
         conn.close()
@@ -216,13 +224,13 @@ def save_chunks_text_only(chunks: list[dict], db_path: Path = DB_PATH) -> int:
     return inserted
 
 
-def embed_pending(batch_size: int = 50, db_path: Path = DB_PATH) -> int:
+def embed_pending(batch_size: int = 100, db_path: Path = DB_PATH) -> int:
     """
     embedding=NULLのレコードをベクトル化してDBを更新する。
     /sr コマンドや明示的な同期タイミングで呼ぶ遅延ベクトル化。
 
     Args:
-        batch_size: 一度に処理する最大件数（デフォルト50）
+        batch_size: 一度に処理する最大件数（デフォルト100）
         db_path:    DBファイルのパス
 
     Returns:
