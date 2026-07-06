@@ -9,28 +9,31 @@ save_and_embed の curl は **必ず `run_in_background: true` で実行**する
 完了通知が来たらレスポンスを読んで結果を報告する。
 ユーザーの会話をブロックするな。2回投げるな。
 
-## 実行フロー（オンデマンド daemon）
+## 実行フロー（常駐 + アイドルタイムアウト daemon）
 
-sui-memory daemon を **使う時だけ** 起動して、処理完了後に自動シャットダウンする。
-連続叩きはほぼ無いユースケースなので「常駐 + アイドルタイムアウト」より効率的。
+sui-memory daemon を **アイドルタイムアウト付きで常駐**させる。モデル（ruri-v3-310m）の
+コールドロードは ~9秒かかるため、毎回使い捨てにすると /sr のたびに9秒待つことになる。
+そこで一度起動したら10分だけ居座らせ、連続で叩けば2回目以降は温まった daemon が即応答、
+無操作が10分続けば 1.2GB のモデルを抱えたまま居座らずに自動 exit する。
 
-**health check はしない。** daemon はほぼ毎回死んでいるので生存確認は空振りするだけの無駄。
-常に「spawn → 待機ループ → POST」の一本道で処理する。待機ループが「既に生きている」ケースも
-吸収するため（生きていれば即 break）、無条件 spawn で問題ない。重複 spawn はポート bind に失敗して
-即 exit するだけで無害。**「生存確認 → DEAD」のようなナレーションを垂れ流すな。**
+**health check の垂れ流しナレーションはするな。** 常に「spawn → 待機ループ → POST」の
+一本道で処理する。待機ループが「既に生きている」ケースを吸収する（生きていれば即 break で
+温かい daemon に即 POST）。重複 spawn はポート bind に失敗して即 exit するだけで無害。
+**「生存確認 → DEAD」のような途中経過を垂れ流すな。**
 
 ### Step 1: daemon を hidden で spawn（PowerShell）
 
-環境変数 `SUI_MEMORY_SHUTDOWN_AFTER=1` で起動するので、処理完了後に daemon が自動 exit する。
+環境変数 `SUI_MEMORY_IDLE_TIMEOUT=600` で起動する。10分間リクエストが無ければ自動 exit する。
 
 ```powershell
-$env:SUI_MEMORY_SHUTDOWN_AFTER = "1"
+$env:SUI_MEMORY_IDLE_TIMEOUT = "600"
 Start-Process -WindowStyle Hidden -FilePath "uv" `
   -ArgumentList "run","--directory","C:/Users/bukol/Documents/sui-memory","python","-m","src.daemon" `
   -PassThru | Out-Null
 ```
 
 PowerShell ツール経由で上記を実行。バックグラウンド spawn なので即制御が戻る。
+（既に温かい daemon が居れば、この spawn はポート bind に失敗して無害に終わる。）
 
 ### Step 2: 起動完了を待機 → POST（bash・バックグラウンド）
 
@@ -46,7 +49,7 @@ done
 curl -s -X POST http://127.0.0.1:7766/save_and_embed -H "Content-Type: application/json" -d '{}'
 ```
 
-レスポンス受信後、daemon は **自動的に exit** する（環境変数 SHUTDOWN_AFTER により）。
+POST を受けるたびに daemon のアイドルタイマーはリセットされる。無操作が10分続くと自動 exit する。
 完了通知が来たら出力ファイルを読んで結果を報告する。**2回投げるな。**
 
 ## レスポンス形式
