@@ -14,24 +14,13 @@ save_and_embed の curl は **必ず `run_in_background: true` で実行**する
 sui-memory daemon を **使う時だけ** 起動して、処理完了後に自動シャットダウンする。
 連続叩きはほぼ無いユースケースなので「常駐 + アイドルタイムアウト」より効率的。
 
-### Step 1: daemon 生存確認
+**health check はしない。** daemon はほぼ毎回死んでいるので生存確認は空振りするだけの無駄。
+常に「spawn → 待機ループ → POST」の一本道で処理する。待機ループが「既に生きている」ケースも
+吸収するため（生きていれば即 break）、無条件 spawn で問題ない。重複 spawn はポート bind に失敗して
+即 exit するだけで無害。**「生存確認 → DEAD」のようなナレーションを垂れ流すな。**
 
-```bash
-curl -sf -m 2 http://127.0.0.1:7766/health > /dev/null && echo ALIVE || echo DEAD
-```
+### Step 1: daemon を hidden で spawn（PowerShell）
 
-### Step 2-A: ALIVE の場合（既に他用途で起動中）
-
-そのまま処理を投げる。daemon は kill しない（他用途を尊重）。
-**`run_in_background: true` で実行し、即座にユーザーに「処理中」と伝えて会話を続行する。**
-
-```bash
-curl -s -X POST http://127.0.0.1:7766/save_and_embed -H "Content-Type: application/json" -d '{}'
-```
-
-### Step 2-B: DEAD の場合（オンデマンド起動 → 処理 → 自動 exit）
-
-PowerShell で hidden プロセスとして spawn する。
 環境変数 `SUI_MEMORY_SHUTDOWN_AFTER=1` で起動するので、処理完了後に daemon が自動 exit する。
 
 ```powershell
@@ -43,7 +32,8 @@ Start-Process -WindowStyle Hidden -FilePath "uv" `
 
 PowerShell ツール経由で上記を実行。バックグラウンド spawn なので即制御が戻る。
 
-その後、bash で daemon の起動完了を待機 → 処理を投げる。
+### Step 2: 起動完了を待機 → POST（bash・バックグラウンド）
+
 **この bash コマンド全体を `run_in_background: true` で実行し、即座にユーザーに「処理中」と伝えて会話を続行する。**
 
 ```bash
