@@ -47,8 +47,17 @@ def format_memories(memories: list[dict]) -> str:
         if len(assistant_text) > 200:
             assistant_text = assistant_text[:200] + "…"
 
+        # ユーザー発言も上限を設ける（assistant側と対称化）。
+        # user_textを無制限で注入すると、巨大な貼り付け（スキルダンプ・
+        # デバッグ依頼プロンプト等）が丸ごとシステムプロンプトに流れ込み、
+        # 注入ブロックだけで数千トークンを食ってコンテキストを劣化させる。
+        # 閾値500字はDB実測（全7324件・p90=379字）から決めた。詳細はkizami側injectorに記載。
+        user_text = mem.get("user_text", "")
+        if len(user_text) > 500:
+            user_text = user_text[:500] + "…"
+
         lines.append(f"### {i}. {date_str}")
-        lines.append(f"**あなた**: {mem.get('user_text', '')}")
+        lines.append(f"**あなた**: {user_text}")
         lines.append(f"**Claude**: {assistant_text}")
         lines.append("")
 
