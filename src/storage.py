@@ -3,6 +3,7 @@ storage.py - チャンクをSQLiteに保存・取得するモジュール
 DBファイルは ~/.sui-memory/memory.db に配置する
 """
 
+import re
 import sqlite3
 import struct
 import time
@@ -378,6 +379,8 @@ def vector_search(
     limit: int = 20,
     db_path: Path = DB_PATH,
     exclude_project: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
 ) -> list[dict]:
     """
     sqlite-vecを使ってコサイン類似度でベクトル検索する。
@@ -387,6 +390,10 @@ def vector_search(
         limit: 最大取得件数（デフォルト20）
         db_path: DBファイルのパス
         exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
+        since: このUnix timestamp以降のレコードのみ対象にする（時間フィルタをSQL側で適用）。
+               ※LIMIT後の後がけフィルタだと、期間外の強マッチが候補枠を食い潰して
+               期間内の関連記憶が候補にすら入らない（候補の飢餓）ため、必ずSQL側で絞る
+        until: このUnix timestamp以前のレコードのみ対象にする（期間指定検索の上限側）
 
     Returns:
         類似度の高い順に並んだdictのリスト。
@@ -395,51 +402,82 @@ def vector_search(
     conn = _get_conn(db_path)
     try:
         cur = conn.cursor()
-        # embeddingがNULLのレコードは除外する。必要に応じてプロジェクト除外も適用する
+        # embeddingがNULLのレコードは除外する。条件は動的に組み立てる
+        conditions = ["m.embedding IS NOT NULL"]
+        params: list = [_vec_to_blob(query_vec)]
         if exclude_project:
-            cur.execute(
-                """
-                SELECT
-                    m.id,
-                    m.session_id,
-                    m.project,
-                    m.project_name,
-                    m.user_text,
-                    m.assistant_text,
-                    m.timestamp,
-                    m.created_at,
-                    vec_distance_cosine(m.embedding, ?) AS distance
-                FROM memories m
-                WHERE m.embedding IS NOT NULL
-                  AND (m.project IS NULL OR m.project != ?)
-                ORDER BY distance ASC
-                LIMIT ?
-                """,
-                (_vec_to_blob(query_vec), exclude_project, limit),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT
-                    m.id,
-                    m.session_id,
-                    m.project,
-                    m.project_name,
-                    m.user_text,
-                    m.assistant_text,
-                    m.timestamp,
-                    m.created_at,
-                    vec_distance_cosine(m.embedding, ?) AS distance
-                FROM memories m
-                WHERE m.embedding IS NOT NULL
-                ORDER BY distance ASC
-                LIMIT ?
-                """,
-                (_vec_to_blob(query_vec), limit),
-            )
+            conditions.append("(m.project IS NULL OR m.project != ?)")
+            params.append(exclude_project)
+        if since is not None:
+            conditions.append("m.created_at >= ?")
+            params.append(since)
+        if until is not None:
+            conditions.append("m.created_at <= ?")
+            params.append(until)
+        params.append(limit)
+        cur.execute(
+            f"""
+            SELECT
+                m.id,
+                m.session_id,
+                m.project,
+                m.project_name,
+                m.user_text,
+                m.assistant_text,
+                m.timestamp,
+                m.created_at,
+                vec_distance_cosine(m.embedding, ?) AS distance
+            FROM memories m
+            WHERE {" AND ".join(conditions)}
+            ORDER BY distance ASC
+            LIMIT ?
+            """,
+            params,
+        )
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+# FTS5クエリ用のトークン抽出パターン。
+# trigramトークナイザーは3文字未満のフレーズに絶対マッチしない（トリグラムが
+# 1つも作れない）ため、3文字以上の連続だけを拾う。日本語の文はスペースで
+# 区切られないため、文字種の連続（英数記号・カタカナ・漢字）ごとに切り出す。
+# ひらがなの連続は助詞・活用語尾が主でノイズになるため拾わない。
+_FTS_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9_\-./]{3,}"    # 英数語（sui-memory, recall, v0.2 など）
+    r"|[ァ-ヴー]{3,}"           # カタカナ語（スキル, プロジェクト など）
+    r"|[一-龥々]{3,}"           # 漢字の連続（翻訳作業, 内容証明 など）
+)
+
+# 巨大な貼り付けクエリでOR句が際限なく膨らむのを防ぐ上限
+_FTS_MAX_TOKENS = 32
+
+
+def _build_fts_query(query: str) -> str:
+    """
+    生のクエリ文字列からFTS5のMATCH式を組み立てる。
+
+    文字種の連続を _FTS_TOKEN_RE で切り出し、各トークンをダブルクォートで
+    囲んだフレーズとしてORで結合する。ANDだと複数キーワードで全トークンの
+    共起を要求してしまい召回率が壊滅する（順位づけはbm25とRRFに任せる）。
+    スペースなしの日本語文（kizamiが渡す生プロンプト等）も、これで
+    「文全体が1フレーズ→常に0件」にならず語単位でマッチできる。
+
+    抽出結果が空の場合は旧来のスペース分割フレーズにフォールバックする
+    （純ひらがなクエリ等。トークン内のダブルクォートは""にエスケープ）。
+    """
+    tokens: list[str] = []
+    for t in _FTS_TOKEN_RE.findall(query):
+        if t not in tokens:  # 重複除去（出現順は保持）
+            tokens.append(t)
+    tokens = tokens[:_FTS_MAX_TOKENS]
+    if tokens:
+        return " OR ".join(f'"{t}"' for t in tokens)
+    # フォールバック: スペース分割の各トークンをフレーズとしてOR結合
+    return " OR ".join(
+        f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in query.split() if t
+    )
 
 
 def fts_search(
@@ -447,6 +485,8 @@ def fts_search(
     limit: int = 20,
     db_path: Path = DB_PATH,
     exclude_project: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
 ) -> list[dict]:
     """
     FTS5でキーワード検索する。
@@ -456,6 +496,9 @@ def fts_search(
         limit: 最大取得件数（デフォルト20）
         db_path: DBファイルのパス
         exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
+        since: このUnix timestamp以降のレコードのみ対象にする（時間フィルタをSQL側で適用）。
+               ※LIMIT後の後がけフィルタだと候補の飢餓が起きるため必ずSQL側で絞る
+        until: このUnix timestamp以前のレコードのみ対象にする（期間指定検索の上限側）
 
     Returns:
         マッチしたrowid・スコア・全フィールドを含むdictのリスト
@@ -464,55 +507,42 @@ def fts_search(
     conn = _get_conn(db_path)
     try:
         cur = conn.cursor()
-        # FTS5の特殊構文（ハイフン・コロン等）を安全にするため、各トークンを
-        # ダブルクォートで囲んでフレーズ検索として渡す。
-        # トークン内のダブルクォートは "" に変換（FTS5フレーズ内のエスケープ規則）。
-        escaped_query = " ".join(f'"{t.replace(chr(34), chr(34)+chr(34))}"' for t in query.split() if t)
+        # MATCH式の組み立ては _build_fts_query に委譲（文字種切り出し＋OR結合）
+        escaped_query = _build_fts_query(query)
         if not escaped_query:
             return []
+        conditions = ["memories_fts MATCH ?"]
+        params: list = [escaped_query]
         if exclude_project:
-            cur.execute(
-                """
-                SELECT
-                    m.id,
-                    m.session_id,
-                    m.project,
-                    m.project_name,
-                    m.user_text,
-                    m.assistant_text,
-                    m.timestamp,
-                    m.created_at,
-                    rank AS score
-                FROM memories_fts
-                JOIN memories m ON memories_fts.rowid = m.id
-                WHERE memories_fts MATCH ?
-                  AND (m.project IS NULL OR m.project != ?)
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (escaped_query, exclude_project, limit),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT
-                    m.id,
-                    m.session_id,
-                    m.project,
-                    m.project_name,
-                    m.user_text,
-                    m.assistant_text,
-                    m.timestamp,
-                    m.created_at,
-                    rank AS score
-                FROM memories_fts
-                JOIN memories m ON memories_fts.rowid = m.id
-                WHERE memories_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (escaped_query, limit),
-            )
+            conditions.append("(m.project IS NULL OR m.project != ?)")
+            params.append(exclude_project)
+        if since is not None:
+            conditions.append("m.created_at >= ?")
+            params.append(since)
+        if until is not None:
+            conditions.append("m.created_at <= ?")
+            params.append(until)
+        params.append(limit)
+        cur.execute(
+            f"""
+            SELECT
+                m.id,
+                m.session_id,
+                m.project,
+                m.project_name,
+                m.user_text,
+                m.assistant_text,
+                m.timestamp,
+                m.created_at,
+                rank AS score
+            FROM memories_fts
+            JOIN memories m ON memories_fts.rowid = m.id
+            WHERE {" AND ".join(conditions)}
+            ORDER BY rank
+            LIMIT ?
+            """,
+            params,
+        )
         return [dict(row) for row in cur.fetchall()]
     finally:
         conn.close()

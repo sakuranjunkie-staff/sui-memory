@@ -47,7 +47,13 @@ def time_decay(created_at: float, half_life_days: int = 30) -> float:
     return 0.5 ** (elapsed / half_life_seconds)
 
 
-def search(query: str, limit: int = 5, db_path: Path = DB_PATH, exclude_project: str | None = None) -> list[dict]:
+def search(
+    query: str,
+    limit: int = 5,
+    db_path: Path = DB_PATH,
+    exclude_project: str | None = None,
+    half_life_days: int = 180,
+) -> list[dict]:
     """
     FTS5キーワード検索とベクトル検索をRRFで統合し、
     時間減衰を適用した最終スコアで上位limit件を返す。
@@ -64,6 +70,10 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH, exclude_project:
         query: 検索クエリ文字列
         limit: 返す件数（デフォルト5）
         db_path: DBファイルのパス
+        half_life_days: 時間減衰の半減期（日数）。明示検索は「古い会話を思い出す」
+                        道具なのでデフォルト180日と緩く、古い完全一致が直近の
+                        ノイズに沈まないようにする（30日だと90日前の完全一致が
+                        ×0.125に沈み、道具の目的と逆向きに働いていた）
 
     Returns:
         scoreフィールドを含むdictのリスト（スコア降順）
@@ -97,7 +107,7 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH, exclude_project:
 
     # --- Step 5: 時間減衰を掛けて最終スコアを計算 ---
     for row_id, record in merged.items():
-        decay = time_decay(record["created_at"])
+        decay = time_decay(record["created_at"], half_life_days=half_life_days)
         record["score"] = record["_rrf"] * decay
 
     # 内部計算用フィールドを削除
@@ -111,9 +121,19 @@ def search(query: str, limit: int = 5, db_path: Path = DB_PATH, exclude_project:
     return sorted_results[:limit]
 
 
-def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = DB_PATH, exclude_project: str | None = None) -> list[dict]:
+def search_by_timerange(
+    query: str,
+    days: int,
+    limit: int = 5,
+    db_path: Path = DB_PATH,
+    exclude_project: str | None = None,
+    until_days: float = 0,
+    half_life_days: int = 180,
+) -> list[dict]:
     """
     指定した日数以内のメモリのみを対象にしてハイブリッド検索する。
+    until_days を指定すると「〇日前から△日前まで」の窓検索になる
+    （例: days=133, until_days=103 → 133日前〜103日前＝3月ごろの記憶だけ）。
 
     処理手順:
     1. fts_search・vector_search で候補を広めに取得（各20件）
@@ -123,24 +143,29 @@ def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = D
 
     Args:
         query: 検索クエリ文字列
-        days: 直近何日以内を対象にするか（例: 7 → 直近7日以内）
+        days: 直近何日以内を対象にするか（例: 7 → 直近7日以内）＝窓の古い側
         limit: 返す件数（デフォルト5）
         db_path: DBファイルのパス
+        until_days: 窓の新しい側（何日前まで）。0なら現在まで（従来動作）
+        half_life_days: 時間減衰の半減期（日数）。search()と同じ理由でデフォルト180日
 
     Returns:
         scoreフィールドを含むdictのリスト（スコア降順）
     """
     # 時間フィルターのカットオフ（Unix timestamp）
-    cutoff = time.time() - days * 86400
+    now = time.time()
+    cutoff = now - days * 86400
+    # 窓の新しい側（0なら制限なし＝現在まで）
+    until_ts = (now - until_days * 86400) if until_days > 0 else None
 
-    # --- Step 1: FTS5キーワード検索とベクトル検索（広めに取得）---
-    fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project)
+    # --- Step 1 & 2: 時間フィルタをSQL側で適用してFTS5・ベクトル検索 ---
+    # 以前は全期間のtop-20を取ってからPython側でカットオフを適用していたが、
+    # それだと期間外の強マッチが候補枠を食い潰し、期間内の関連記憶が候補にすら
+    # 入らない（候補の飢餓）。期間を広げても同じ20件を絞り直すだけで候補が増えず、
+    # NORESULTや薄い結果の常態化を招いていた。必ずsinceでSQL側から絞る。
+    fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project, since=cutoff, until=until_ts)
     query_vec = embed_query(query)
-    vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project)
-
-    # --- Step 2: created_at フィルターを適用（カットオフ以降のみ残す）---
-    fts_results = [r for r in fts_results if r["created_at"] >= cutoff]
-    vec_results = [r for r in vec_results if r["created_at"] >= cutoff]
+    vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project, since=cutoff, until=until_ts)
 
     # --- Step 3: RRFスコア統合 ---
     merged: dict[int, dict] = {}
@@ -163,7 +188,7 @@ def search_by_timerange(query: str, days: int, limit: int = 5, db_path: Path = D
 
     # 時間減衰を掛けて最終スコアを計算
     for record in merged.values():
-        decay = time_decay(record["created_at"])
+        decay = time_decay(record["created_at"], half_life_days=half_life_days)
         record["score"] = record["_rrf"] * decay
 
     # 内部計算用フィールドを除去

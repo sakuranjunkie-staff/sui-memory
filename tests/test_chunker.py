@@ -89,7 +89,8 @@ def test_file_history_snapshot_ignored():
         {"type": "file-history-snapshot", "files": []},
         {
             "type": "user",
-            "message": {"content": "質問"},
+            # ノイズフィルター（_MIN_USER_TEXT_LEN=3）に落ちない長さにする
+            "message": {"content": "質問です"},
             "timestamp": "2026-03-23T10:00:00.000Z",
             "sessionId": "s1",
             "cwd": "/tmp",

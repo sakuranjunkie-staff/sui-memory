@@ -321,15 +321,23 @@ old_in_60d = any(r["session_id"] == "s-old1" for r in results_60d)
 check("60日フィルター: 30日前データが含まれる", old_in_60d,
       "s-old1が含まれていない" if not old_in_60d else "")
 
-# 時間減衰により古いデータのスコアが新しいデータより低い
+# 時間減衰の検証（2026/7/12設計変更対応）:
+# デフォルト半減期は180日（明示検索は「古い会話を思い出す」道具のため緩い）。
+# 30日前のデータは×0.89程度しか沈まず、RRFの順位差で新データを上回ることも
+# 正当にありうる。減衰そのものの効きは半減期を極端に短くして確認する。
 if old_in_60d and len(results_60d) >= 2:
-    fresh_scores = [r["score"] for r in results_60d if r["session_id"] != "s-old1"]
-    old_score = next(r["score"] for r in results_60d if r["session_id"] == "s-old1")
-    avg_fresh = sum(fresh_scores) / len(fresh_scores) if fresh_scores else 0
-    print(f"\n  時間減衰の効果: 古いデータのスコア={old_score:.8f}, 新データ平均={avg_fresh:.8f}")
-    check("時間減衰: 30日前データのスコアが新データより低い",
-          old_score < avg_fresh if avg_fresh > 0 else True,
-          f"old={old_score:.8f}, avg_fresh={avg_fresh:.8f}")
+    results_hl1 = search_by_timerange("Python", days=60, limit=10, db_path=TMP_DB, half_life_days=1)
+    fresh_hl1 = [r["score"] for r in results_hl1 if r["session_id"] != "s-old1"]
+    old_hl1 = next((r["score"] for r in results_hl1 if r["session_id"] == "s-old1"), 0.0)
+    avg_fresh_hl1 = sum(fresh_hl1) / len(fresh_hl1) if fresh_hl1 else 0
+    print(f"\n  時間減衰の効果(半減期1日): 古いデータ={old_hl1:.8f}, 新データ平均={avg_fresh_hl1:.8f}")
+    check("時間減衰: 半減期1日なら30日前データが新データ平均より沈む",
+          old_hl1 < avg_fresh_hl1 if avg_fresh_hl1 > 0 else True,
+          f"old={old_hl1:.8f}, avg_fresh={avg_fresh_hl1:.8f}")
+    # デフォルト半減期180日では30日前の減衰係数は9割前後にとどまる（緩い設計の確認）
+    decay_30d = time_decay(time.time() - 30 * 86400, half_life_days=180)
+    check("時間減衰: デフォルト半減期180日で30日前の係数が0.85以上",
+          decay_30d >= 0.85, f"decay={decay_30d:.4f}")
 
 
 # ---------------------------------------------------------------------------
