@@ -281,8 +281,8 @@ for query, note in search_cases:
     if len(results) >= 2:
         check(f"search '{query}': スコア降順",
               all(results[j]["score"] >= results[j+1]["score"] for j in range(len(results)-1)))
-    check(f"search '{query}': distanceフィールドなし",
-          all("distance" not in r for r in results))
+    check(f"search '{query}': distanceフィールドあり（関連判定用・2026/7/12〜）",
+          all("distance" in r for r in results))
     check(f"search '{query}': scoreフィールドあり",
           all("score" in r for r in results))
 

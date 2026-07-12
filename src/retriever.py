@@ -103,6 +103,9 @@ def search(
         if row_id not in merged:
             merged[row_id] = dict(row)
             merged[row_id]["_rrf"] = 0.0
+        else:
+            # FTS側から先に入ったレコードにもコサイン距離を持たせる
+            merged[row_id]["distance"] = row["distance"]
         merged[row_id]["_rrf"] += rrf_score(rank)
 
     # --- Step 5: 時間減衰を掛けて最終スコアを計算 ---
@@ -110,11 +113,13 @@ def search(
         decay = time_decay(record["created_at"], half_life_days=half_life_days)
         record["score"] = record["_rrf"] * decay
 
-    # 内部計算用フィールドを削除
+    # 内部計算用フィールドを削除。
+    # distance（コサイン距離）は残す: RRFスコアは順位づけ専用で関連の絶対的な
+    # 強さを測れないため、呼び出し側の「ヒットあり/なし」判定はdistanceで行う
+    # （FTS単独ヒットのレコードはdistanceを持たないのでNoneを入れる）
     for record in merged.values():
         record.pop("_rrf", None)
-        # vector_searchのdistanceフィールドも除去（scoreに統一）
-        record.pop("distance", None)
+        record.setdefault("distance", None)
 
     # --- Step 6: 最終スコア降順でlimit件返す ---
     sorted_results = sorted(merged.values(), key=lambda r: r["score"], reverse=True)
@@ -184,6 +189,9 @@ def search_by_timerange(
         if row_id not in merged:
             merged[row_id] = dict(row)
             merged[row_id]["_rrf"] = 0.0
+        else:
+            # FTS側から先に入ったレコードにもコサイン距離を持たせる
+            merged[row_id]["distance"] = row["distance"]
         merged[row_id]["_rrf"] += rrf_score(rank)
 
     # 時間減衰を掛けて最終スコアを計算
@@ -191,10 +199,10 @@ def search_by_timerange(
         decay = time_decay(record["created_at"], half_life_days=half_life_days)
         record["score"] = record["_rrf"] * decay
 
-    # 内部計算用フィールドを除去
+    # 内部計算用フィールドを除去（distanceは関連判定用に残す。search()と同じ理由）
     for record in merged.values():
         record.pop("_rrf", None)
-        record.pop("distance", None)
+        record.setdefault("distance", None)
 
     # --- Step 4: 最終スコア降順でlimit件返す ---
     sorted_results = sorted(merged.values(), key=lambda r: r["score"], reverse=True)

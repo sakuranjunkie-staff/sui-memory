@@ -173,12 +173,14 @@ def test_search_limit():
     print(f"  OK: search limit=2 → {len(results)}件")
 
 
-def test_search_no_distance_field():
-    """vector_search由来のdistanceフィールドは除去されている"""
+def test_search_has_distance_field():
+    """distance（コサイン距離）が結果に残る（2026/7/12〜: 関連判定用）。
+    ベクトル候補はfloat、FTS単独候補はNone。"""
     db = make_db_with_data()
     results = search("Python", limit=5, db_path=db)
-    assert all("distance" not in r for r in results)
-    print("  OK: distanceフィールドなし")
+    assert all("distance" in r for r in results)
+    assert all(r["distance"] is None or isinstance(r["distance"], float) for r in results)
+    print("  OK: distanceフィールドあり（float or None）")
 
 
 def test_search_rrf_fusion():
@@ -316,13 +318,13 @@ def test_search_by_timerange_score_descending():
     print("  OK: search_by_timerange スコア降順")
 
 
-def test_search_by_timerange_no_distance_field():
-    """search_by_timerangeの結果にdistanceフィールドが含まれないこと"""
+def test_search_by_timerange_has_distance_field():
+    """search_by_timerangeの結果にもdistance（コサイン距離）が残ること"""
     db = make_db_with_aged_data()
     results = search_by_timerange("Python", days=7, limit=5, db_path=db)
 
-    assert all("distance" not in r for r in results)
-    print("  OK: search_by_timerange distanceフィールドなし")
+    assert all("distance" in r for r in results)
+    print("  OK: search_by_timerange distanceフィールドあり")
 
 
 def test_search_by_timerange_limit():
@@ -397,7 +399,7 @@ if __name__ == "__main__":
     test_search_score_descending()
     test_search_python_returns_python_content()
     test_search_limit()
-    test_search_no_distance_field()
+    test_search_has_distance_field()
     test_search_rrf_fusion()
     test_search_all_required_fields()
     print("--- search_by_timerange / search_recent テスト ---")
@@ -406,7 +408,7 @@ if __name__ == "__main__":
     test_search_by_timerange_wide_includes_old()
     test_search_by_timerange_has_score_field()
     test_search_by_timerange_score_descending()
-    test_search_by_timerange_no_distance_field()
+    test_search_by_timerange_has_distance_field()
     test_search_by_timerange_limit()
     test_search_by_timerange_empty_when_all_old()
     test_search_recent_is_7day_shortcut()
