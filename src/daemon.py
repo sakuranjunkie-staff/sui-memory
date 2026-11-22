@@ -152,7 +152,14 @@ async def _touch_idle(request, call_next):
         "origin" in request.headers
         or request.headers.get("sec-fetch-site", "none").lower() != "none"
     )
-    if host not in _ALLOWED_HOSTS or from_browser:
+    # 見出しを付けない古いブラウザへの備え：POST は JSON と宣言された要求だけ受け付ける。
+    # ブラウザは JSON と宣言した要求を、事前確認（CORS プリフライト）なしでは他サイトへ送れず、
+    # この daemon は事前確認に応じないので、見出しの有無に関係なくブラウザからは届かない
+    not_json_post = (
+        request.method == "POST"
+        and not request.headers.get("content-type", "").lower().startswith("application/json")
+    )
+    if host not in _ALLOWED_HOSTS or from_browser or not_json_post:
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "forbidden"}, status_code=403)
     _LAST_REQUEST_AT = time.time()
