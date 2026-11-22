@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# /sr save_and_embed — daemon の起動完了を待ってから POST。
+# /sr embed_pending — daemon の起動完了を待ってから POST（2026-11-23：保存はStopフックが担うので、ベクトル化だけに変更）。
 # ~/.claude/commands/sr.md から run_in_background:true で短く呼ばれる常設スクリプト（heavy_cmd_guard フック回避のため多行インラインを廃してここへ移設）。
 # POST を受けるたびに daemon のアイドルタイマーはリセットされる。
 for i in $(seq 1 60); do
@@ -8,4 +8,4 @@ for i in $(seq 1 60); do
     fi
     sleep 1
 done
-curl -s -X POST http://127.0.0.1:7766/save_and_embed -H "Content-Type: application/json" -d '{}'
+curl -s -X POST http://127.0.0.1:7766/embed_pending -H "Content-Type: application/json" -d '{}'
