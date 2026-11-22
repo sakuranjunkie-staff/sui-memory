@@ -133,10 +133,21 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="sui-memory daemon", version=_DAEMON_VERSION, lifespan=_lifespan)
 
 
+# 受け付ける宛先名（Host ヘッダのホスト部）。127.0.0.1 で待ち受けていても、
+# 外のサイトが自分の名前を 127.0.0.1 に向け直す手口（DNS リバインディング）を使うと、
+# ブラウザ経由でこの daemon を叩いて会話の中身（/search_recent）を読み出せてしまう。
+# その場合の Host は外のサイトの名前になるので、ここで断る（2026-11-23）。
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+
+
 @app.middleware("http")
 async def _touch_idle(request, call_next):
-    """毎リクエストでアイドルタイマーを更新する（IDLE_TIMEOUT モードの自動終了判定用）。"""
+    """宛先名を確かめ、毎リクエストでアイドルタイマーを更新する（IDLE_TIMEOUT モードの自動終了判定用）。"""
     global _LAST_REQUEST_AT
+    host = request.headers.get("host", "").rsplit(":", 1)[0].strip("[]").lower()
+    if host not in _ALLOWED_HOSTS:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "forbidden host"}, status_code=403)
     _LAST_REQUEST_AT = time.time()
     return await call_next(request)
 
