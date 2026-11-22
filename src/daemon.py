@@ -186,7 +186,10 @@ def _find_latest_transcript() -> Optional[Path]:
     projects_dir = Path.home() / ".claude" / "projects"
     if not projects_dir.exists():
         return None
-    jsonl_files = [p for p in projects_dir.rglob("*.jsonl") if p.stat().st_size > 0]
+    # subagents\ 配下はサブエージェントの使い捨てtranscript＝本線の会話ではないので除外
+    # （サブエージェント終了直後に/srを撃つと最新mtimeがそちらになり誤保存する・2026-07-22実害）
+    jsonl_files = [p for p in projects_dir.rglob("*.jsonl")
+                   if p.stat().st_size > 0 and "subagents" not in p.parts]
     if not jsonl_files:
         return None
     return max(jsonl_files, key=lambda p: p.stat().st_mtime)
