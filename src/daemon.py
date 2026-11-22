@@ -145,9 +145,16 @@ async def _touch_idle(request, call_next):
     """宛先名を確かめ、毎リクエストでアイドルタイマーを更新する（IDLE_TIMEOUT モードの自動終了判定用）。"""
     global _LAST_REQUEST_AT
     host = request.headers.get("host", "").rsplit(":", 1)[0].strip("[]").lower()
-    if host not in _ALLOWED_HOSTS:
+    # ブラウザ発の要求も断る。外のページが Host を 127.0.0.1 のまま送ってくると上の確認は通るが、
+    # 返事は読めなくても保存やベクトル化を勝手に走らせられる（CSRF）。ブラウザは必ず Origin か
+    # Sec-Fetch-Site を付け、kizami・巡回・/sr（urllib・Invoke-RestMethod・curl）は付けない（2026-11-23）
+    from_browser = (
+        "origin" in request.headers
+        or request.headers.get("sec-fetch-site", "none").lower() != "none"
+    )
+    if host not in _ALLOWED_HOSTS or from_browser:
         from fastapi.responses import JSONResponse
-        return JSONResponse({"detail": "forbidden host"}, status_code=403)
+        return JSONResponse({"detail": "forbidden"}, status_code=403)
     _LAST_REQUEST_AT = time.time()
     return await call_next(request)
 
