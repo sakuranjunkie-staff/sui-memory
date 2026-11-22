@@ -11,6 +11,7 @@ daemon.py - sui-memory 常駐 HTTP サーバ
 - POST /save_session     — 最新セッションの jsonl をチャンク化して保存 + ベクトル化
 - POST /embed_pending    — embedding=NULL のチャンクを一括ベクトル化
 - POST /save_and_embed   — 上記2つをまとめて実行（/sr 互換）
+- POST /search_recent    — 直近7日のハイブリッド検索（kizami の関連メモリ注入が使う）
 
 ポート: 7766（環境変数 SUI_MEMORY_DAEMON_PORT で上書き可）
 バインド: 127.0.0.1（ローカル限定・外部公開しない）
@@ -271,6 +272,36 @@ def embed_pending_endpoint(req: EmbedPendingRequest) -> EmbedPendingResponse:
     else:
         embedded = storage.embed_pending(batch_size=req.batch_size)
     return EmbedPendingResponse(embedded=embedded)
+
+
+# ---------------------------------------------------------------------------
+# Search（kizami の関連メモリ注入用・2026-11-23）
+# ---------------------------------------------------------------------------
+# kizami の injector は発言のたびに新しいプロセスで立ち上がる。そこで検索すると、
+# 毎回モデル（約1.2GB）を読み込み直して約9秒かかっていた（実測 8.6秒・9.0秒）。
+# モデルを読み込み済みの daemon に検索だけを頼めば、その読み込みが消える。
+
+
+class SearchRecentRequest(BaseModel):
+    query: str
+    limit: int = 5
+    exclude_project: Optional[str] = None
+
+
+class SearchRecentResponse(BaseModel):
+    memories: list[dict]
+
+
+@app.post("/search_recent", response_model=SearchRecentResponse)
+def search_recent_endpoint(req: SearchRecentRequest) -> SearchRecentResponse:
+    """直近7日のハイブリッド検索（retriever.search_recent と同じ結果）を返す。
+
+    自動 exit（SHUTDOWN_AFTER）は発火させない。アイドルタイマーはミドルウェアが更新する。
+    """
+    memories = retriever.search_recent(
+        req.query, limit=req.limit, exclude_project=req.exclude_project
+    )
+    return SearchRecentResponse(memories=memories)
 
 
 # ---------------------------------------------------------------------------

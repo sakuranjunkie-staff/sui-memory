@@ -7,7 +7,10 @@ import time
 from pathlib import Path
 
 from storage import DB_PATH, fts_search, vector_search
-from embedder import embed_query
+
+# embedder（sentence-transformers＋torch・モデル約1.2GB）はここで import しない。
+# import するだけで数秒かかるため、ベクトル検索を実際に行う時に関数の中で読み込む。
+# キーワード検索だけで済ませる呼び出し（use_vector=False）は、これで一瞬で終わる（2026-11-23）。
 
 
 def rrf_score(rank: int, k: int = 60) -> float:
@@ -82,6 +85,7 @@ def search(
     fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project)
 
     # --- Step 2 & 3: ベクトル検索 ---
+    from embedder import embed_query  # 重いので使う時に読み込む（冒頭の注記参照）
     query_vec = embed_query(query)
     vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project)
 
@@ -134,9 +138,11 @@ def search_by_timerange(
     exclude_project: str | None = None,
     until_days: float = 0,
     half_life_days: int = 180,
+    use_vector: bool = True,
 ) -> list[dict]:
     """
     指定した日数以内のメモリのみを対象にしてハイブリッド検索する。
+    use_vector=False ならキーワード検索（FTS5）だけで探す（モデルを読み込まない）。
     until_days を指定すると「〇日前から△日前まで」の窓検索になる
     （例: days=133, until_days=103 → 133日前〜103日前＝3月ごろの記憶だけ）。
 
@@ -169,8 +175,11 @@ def search_by_timerange(
     # 入らない（候補の飢餓）。期間を広げても同じ20件を絞り直すだけで候補が増えず、
     # NORESULTや薄い結果の常態化を招いていた。必ずsinceでSQL側から絞る。
     fts_results = fts_search(query, limit=20, db_path=db_path, exclude_project=exclude_project, since=cutoff, until=until_ts)
-    query_vec = embed_query(query)
-    vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project, since=cutoff, until=until_ts)
+    vec_results: list[dict] = []
+    if use_vector:
+        from embedder import embed_query  # 重いので使う時に読み込む（冒頭の注記参照）
+        query_vec = embed_query(query)
+        vec_results = vector_search(query_vec, limit=20, db_path=db_path, exclude_project=exclude_project, since=cutoff, until=until_ts)
 
     # --- Step 3: RRFスコア統合 ---
     merged: dict[int, dict] = {}
@@ -214,6 +223,7 @@ def search_recent(
     limit: int = 5,
     db_path: Path = DB_PATH,
     exclude_project: str | None = None,
+    use_vector: bool = True,
 ) -> list[dict]:
     """
     直近7日以内のメモリを対象にしてハイブリッド検索するショートカット。
@@ -225,8 +235,10 @@ def search_recent(
         limit: 返す件数（デフォルト5）
         db_path: DBファイルのパス
         exclude_project: このプロジェクトパスのレコードを除外する（例: 'G:/KagamiAlice'）
+        use_vector: Falseならキーワード検索だけ（モデルを読み込まない）
 
     Returns:
         scoreフィールドを含むdictのリスト（スコア降順）
     """
-    return search_by_timerange(query, days=7, limit=limit, db_path=db_path, exclude_project=exclude_project)
+    return search_by_timerange(query, days=7, limit=limit, db_path=db_path,
+                               exclude_project=exclude_project, use_vector=use_vector)
