@@ -214,3 +214,39 @@ if __name__ == "__main__":
     test_multiple_pairs()
     test_user_content_as_list()
     print("=== 全テスト通過 ===")
+
+
+def test_answer_after_tool_calls_is_kept(tmp_path):
+    """前置きの一言→道具→本当の答え、のターンで答えの本体まで保存される（2026-11-23）"""
+    entries = [
+        {"type": "user", "message": {"content": "状況はどうだ"},
+         "timestamp": "2026-11-23T10:00:00.000Z", "sessionId": "s1", "cwd": "C:/p"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "調べる。"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "考え中"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "順調に進んでいる。"}]}},
+        {"type": "user", "message": {"content": "次の質問"},
+         "timestamp": "2026-11-23T10:05:00.000Z", "sessionId": "s1", "cwd": "C:/p"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "次の答え"}]}},
+    ]
+    p = tmp_path / "t.jsonl"
+    write_jsonl(p, entries)
+    chunks = load_chunks(str(p))
+    assert len(chunks) == 2
+    assert chunks[0]["user"] == "状況はどうだ"
+    assert chunks[0]["assistant"] == "調べる。\n\n順調に進んでいる。"
+    assert "考え中" not in chunks[0]["assistant"]
+    assert chunks[1]["assistant"] == "次の答え"
+
+
+def test_unanswered_last_user_is_not_saved(tmp_path):
+    """返答のtextがまだ無い最後の発言は保存しない（道具の途中で切れた等）"""
+    entries = [
+        {"type": "user", "message": {"content": "質問です"},
+         "timestamp": "2026-11-23T10:00:00.000Z", "sessionId": "s1", "cwd": "C:/p"},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]}},
+    ]
+    p = tmp_path / "t.jsonl"
+    write_jsonl(p, entries)
+    assert load_chunks(str(p)) == []

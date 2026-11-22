@@ -75,7 +75,46 @@ def load_chunks(transcript_path: str) -> list[dict]:
 
     # userとassistantのペアを抽出する
     # file-history-snapshotは無視する
-    pending_user = None  # 対応するassistantを待っているuserメッセージ
+    #
+    # 返答は「次の本物のuser発言が来るまで」のassistantのtextを全部つないで1つにする（2026-11-23）。
+    # 旧版は最初にtextが出たassistantで組を閉じていたため、「調べる」と一言書いてから道具を使い、
+    # その後に本当の答えを書いたターンでは、前置きの一言だけが保存されていた（全体の約19%）。
+    pending_user = None      # 対応するassistantを待っているuserメッセージ
+    assistant_parts = []     # そのuserに対するassistantのtext（ターン内の全部）
+
+    def _flush() -> None:
+        """溜めたuserとassistantの組を、フィルターを通してchunksに入れる"""
+        if pending_user is None or not assistant_parts:
+            # 返答のtextがまだ無い発言（未回答・道具だけのターン）は保存しない
+            return
+
+        user_text = _extract_text(pending_user.get("message", {}).get("content", ""))
+        assistant_text = "\n\n".join(assistant_parts).strip()
+
+        # userテキストが空の場合はペアごとスキップ
+        if not user_text or not assistant_text:
+            return
+
+        # ノイズフィルター: 短すぎる相槌・確認はスキップ
+        # （"ok", "はい", "了解" 等。_MIN_USER_TEXT_LEN 文字未満）
+        if len(user_text) < _MIN_USER_TEXT_LEN:
+            return
+
+        # コンテキスト継続サマリーフィルター:
+        # "This session is being continued..." で始まるテキストは
+        # Claude Codeが自動生成した要約であり、ユーザーの発言ではない。
+        # ベクトル化・検索の対象から除外する。
+        if any(user_text.startswith(prefix) for prefix in _CONTEXT_SUMMARY_PREFIXES):
+            return
+
+        # session_idとprojectはtranscript内のエントリから取得
+        chunks.append({
+            "user": user_text,
+            "assistant": assistant_text,
+            "timestamp": pending_user.get("timestamp", ""),
+            "session_id": pending_user.get("sessionId", ""),
+            "project": pending_user.get("cwd", ""),
+        })
 
     for entry in lines:
         msg_type = entry.get("type")
@@ -86,12 +125,13 @@ def load_chunks(transcript_path: str) -> list[dict]:
 
         if msg_type == "user":
             # ツール結果のみのターン（type="tool_result" ブロックのみ）は
-            # pending_user を上書きしない。
-            # 「質問 → ツールコール × N → 最終回答」の流れで元の質問が
-            # ツール結果ターンに上書きされてしまうバグを防ぐ。
+            # 組を閉じない（元の質問のまま、続く返答を溜め続ける）。
             user_content = entry.get("message", {}).get("content", "")
             if _extract_text(user_content):
+                # 本物の発言が来た＝前の組はここで完結
+                _flush()
                 pending_user = entry
+                assistant_parts = []
 
         elif msg_type == "assistant":
             if pending_user is None:
@@ -99,58 +139,12 @@ def load_chunks(transcript_path: str) -> list[dict]:
                 continue
 
             # assistantのcontentからtextブロックのみ抽出（thinkingは除外）
-            assistant_content = entry.get("message", {}).get("content", "")
-            if isinstance(assistant_content, list):
-                text_parts = []
-                for block in assistant_content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                assistant_text = "\n".join(text_parts).strip()
-            else:
-                assistant_text = _extract_text(assistant_content)
+            # textが空のエントリー（thinkingのみ・道具の呼び出しのみ）は足さない
+            assistant_text = _extract_text(entry.get("message", {}).get("content", ""))
+            if assistant_text:
+                assistant_parts.append(assistant_text)
 
-            # userのテキストを抽出
-            user_content = pending_user.get("message", {}).get("content", "")
-            user_text = _extract_text(user_content)
-
-            # assistantのtextが空の場合（thinkingのみのストリーミング中間エントリー等）は
-            # pending_userを保持したまま次のassistantエントリーを待つ
-            if not assistant_text:
-                continue
-
-            # userテキストが空の場合はペアごとスキップ
-            if not user_text:
-                pending_user = None
-                continue
-
-            # ノイズフィルター: 短すぎる相槌・確認はスキップ
-            # （"ok", "はい", "了解" 等。_MIN_USER_TEXT_LEN 文字未満）
-            if len(user_text) < _MIN_USER_TEXT_LEN:
-                pending_user = None
-                continue
-
-            # コンテキスト継続サマリーフィルター:
-            # "This session is being continued..." で始まるテキストは
-            # Claude Codeが自動生成した要約であり、ユーザーの発言ではない。
-            # ベクトル化・検索の対象から除外する。
-            if any(user_text.startswith(prefix) for prefix in _CONTEXT_SUMMARY_PREFIXES):
-                pending_user = None
-                continue
-
-            # session_idとprojectはtranscript内のエントリから取得
-            session_id = pending_user.get("sessionId", "")
-            project = pending_user.get("cwd", "")
-            timestamp = pending_user.get("timestamp", "")
-
-            chunks.append({
-                "user": user_text,
-                "assistant": assistant_text,
-                "timestamp": timestamp,
-                "session_id": session_id,
-                "project": project,
-            })
-
-            # ペアを消費したのでリセット
-            pending_user = None
+    # 最後の組（ファイル末尾まで次の発言が無い）を閉じる
+    _flush()
 
     return chunks
